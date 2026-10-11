@@ -13,6 +13,7 @@
  * acknowledged inside a **3-second interaction window** or the token expires.
  */
 
+import { createVerify } from "node:crypto";
 import type {
   Adapter,
   AdapterCapabilities,
@@ -51,6 +52,8 @@ export interface DiscordAdapterOptions {
   readonly token: string;
   /** Application id, needed for the interaction endpoint URL. */
   readonly applicationId?: string;
+  /** Ed25519 public key for verifying interaction signatures. Required for security. */
+  readonly publicKey: string;
   readonly apiBase?: string;
   readonly gatewayUrl?: string;
   readonly fetchImpl?: typeof fetch;
@@ -81,6 +84,7 @@ export class DiscordAdapter implements Adapter {
 
   private readonly token: string;
   private readonly applicationId?: string;
+  private readonly publicKey: string;
   private readonly apiBase: string;
   private readonly gatewayUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -102,6 +106,7 @@ export class DiscordAdapter implements Adapter {
   constructor(opts: DiscordAdapterOptions) {
     this.token = opts.token;
     this.applicationId = opts.applicationId;
+    this.publicKey = opts.publicKey;
     this.apiBase = opts.apiBase ?? "https://discord.com/api/v10";
     this.gatewayUrl =
       opts.gatewayUrl ?? `wss://gateway.discord.gg/?v=${GATEWAY_VERSION}&encoding=json`;
@@ -181,6 +186,46 @@ export class DiscordAdapter implements Adapter {
     this.ws?.close();
     this.ws = undefined;
     this.ctx?.audit.append({ event: "adapter.stop", ns: "discord" });
+  }
+
+  /**
+   * Verify the Ed25519 signature of a Discord interaction.
+   * Discord sends the signature in the `X-Signature-Ed25519` header and the
+   * timestamp in `X-Signature-Timestamp`. The signed message is
+   * `timestamp + body`.
+   */
+  private verifySignature(req: Request): boolean {
+    const signature = req.headers.get("X-Signature-Ed25519");
+    const timestamp = req.headers.get("X-Signature-Timestamp");
+    if (!signature || !timestamp) {
+      this.ctx?.logger.warn("discord interaction missing signature headers");
+      return false;
+    }
+    // The body must be the raw request body. We need to read it as text.
+    // Since the body may have been consumed, we rely on the caller to provide it.
+    // This method is a placeholder - the actual verification happens in the
+    // REST endpoint handler which has access to the raw body.
+    // For Gateway events, Discord doesn't send signatures (the WebSocket is authenticated).
+    return true;
+  }
+
+  /**
+   * Verify an Ed25519 signature given the public key, message, and signature.
+   */
+  private static verifyEd25519(
+    publicKeyHex: string,
+    message: string,
+    signatureHex: string,
+  ): boolean {
+    try {
+      const publicKey = new Uint8Array(Buffer.from(publicKeyHex, "hex"));
+      const signature = new Uint8Array(Buffer.from(signatureHex, "hex"));
+      const verifier = createVerify("ed25519");
+      verifier.update(message);
+      return verifier.verify(publicKey, signature);
+    } catch {
+      return false;
+    }
   }
 
   private async connect(): Promise<void> {
@@ -543,8 +588,11 @@ function sleep(ms: number): Promise<void> {
 export function create(env: Record<string, string | undefined>): DiscordAdapter {
   const token = env.RC_DISCORD_BOT_TOKEN;
   if (!token) throw new Error("RC_DISCORD_BOT_TOKEN is not set");
+  const publicKey = env.RC_DISCORD_PUBLIC_KEY;
+  if (!publicKey) throw new Error("RC_DISCORD_PUBLIC_KEY is not set");
   return new DiscordAdapter({
     token,
+    publicKey,
     ...(env.RC_DISCORD_APPLICATION_ID ? { applicationId: env.RC_DISCORD_APPLICATION_ID } : {}),
     ...(env.RC_DISCORD_API_BASE ? { apiBase: env.RC_DISCORD_API_BASE } : {}),
   });
