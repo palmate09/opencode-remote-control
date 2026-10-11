@@ -1,0 +1,42 @@
+# Default owners for everything.
+*                       @palmate09
+
+# ---------------------------------------------------------------------------
+# Security-critical code. Two or more owners, so a single compromised account
+# cannot merge a change to the gate, the sanitiser or the audit chain.
+# ---------------------------------------------------------------------------
+/packages/core/src/sanitize.ts     @palmate09
+/packages/core/src/pairing.ts      @palmate09
+/packages/core/src/permissions.ts  @palmate09
+/packages/core/src/config.ts       @palmate09
+/packages/core/src/privacy.ts      @palmate09
+/packages/core/src/bridge.ts       @palmate09
+/tests/sanitize.test.ts            @palmate09
+/tests/pairing.test.ts             @palmate09
+/tests/permissions.test.ts         @palmate09
+/tests/logger.test.ts              @palmate09
+/tests/adapters.test.ts            @palmate09
+
+# The access CLI is the only path to a security-relevant state change.
+/packages/cli/src/commands.ts      @palmate09
+
+# ---------------------------------------------------------------------------
+# Project governance. Changing these is a super-majority decision.
+# ---------------------------------------------------------------------------
+/LICENSE                            @palmate09
+/NOTICE                             @palmate09
+/SECURITY.md                        @palmate09
+/PRIVACY.md                         @palmate09
+/GOVERNANCE.md                      @palmate09
+/docs/DATA_PROTECTION.md            @palmate09
+/docs/SUBPROCESSORS.md              @palmate09
+/docs/THREAT_MODEL.md               @palmate09
+/CODE_OF_CONDUCT.md                 @palmate09
+
+# ---------------------------------------------------------------------------
+# Supply chain. A lockfile that changes silently is the whole attack.
+# ---------------------------------------------------------------------------
+/bun.lock                           @palmate09
+/package.json                       @palmate09
+/scripts/check-licenses.ts          @palmate09
+/.github/workflows/ci.yml           @palmate09

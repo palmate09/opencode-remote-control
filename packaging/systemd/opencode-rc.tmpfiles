@@ -1,0 +1,5 @@
+# opencode-rc runtime directories
+# Type Path                    Mode UID        GID     Age Argument
+d    /run/opencode-rc        0755 opencode-rc opencode-rc - -
+d    /var/lib/opencode-rc    0750 opencode-rc opencode-rc - -
+d    /var/log/opencode-rc    0750 opencode-rc opencode-rc - -

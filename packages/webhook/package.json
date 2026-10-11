@@ -1,0 +1,13 @@
+{
+  "name": "@opencode-rc/webhook",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic webhook adapter — the escape hatch for platforms without a library.",
+  "license": "MIT",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "build": "echo \"webhook ships TypeScript source\"" },
+  "dependencies": { "@opencode-rc/core": "workspace:*" }
+}

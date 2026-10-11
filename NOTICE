@@ -1,0 +1,61 @@
+# NOTICE
+
+opencode-rc
+Copyright (c) 2026 opencode-rc contributors
+
+## Attribution
+
+**opencode-rc is inspired by Claude Code's "Channels" feature.** The design of
+a chat bridge that dials out to a messaging platform, relays an agent's output,
+and turns permission requests into tappable buttons was studied from publicly
+available description of how Claude Code's remote-control system behaves.
+
+**No Anthropic code was copied.** Every line in this repository was written from
+scratch for this project. Two protocol constants are shared with the Claude
+implementation, and we state them plainly so there is no ambiguity later:
+
+| Constant | Value | Why it is not creative expression |
+|---|---|---|
+| Pairing code length and format | 6 lowercase hex characters from 3 CSPRNG bytes | A code format is a functional specification. Any implementation must interoperate with the same human-facing flow. |
+| Permission reply grammar | `/^\s*(y\|yes\|n\|no\|always\|a)\s+([a-km-z]{5})\s*$/i` | A documented wire grammar. |
+
+Neither is copyrightable subject matter; both are the minimum specification
+needed for two components to talk to each other. No other part of the Claude
+Code implementation was consulted for, or reproduced in, this codebase.
+
+## Third-party software
+
+This project depends on, but does not redistribute, the following. Full
+transitive licences are enumerated by `bun run deps:license` and verified in CI.
+
+- [opencode](https://opencode.ai) and `@opencode-ai/sdk` — MIT. The agent this
+  project controls. Not a dependency of the bridge itself; the bridge talks to a
+  running opencode server over HTTP.
+- [Model Context Protocol SDK](https://github.com/modelcontextprotocol/typescript-sdk) —
+  MIT. Used only by `packages/mcp`.
+- [Biome](https://biomejs.dev) — MIT/MIT OR Apache-2.0. Linting and formatting.
+- [TypeScript](https://www.typescriptlang.org) — Apache-2.0. Type checking.
+- [Bun](https://bun.sh) — MIT. Runtime.
+- [zod](https://github.com/colinhacks/zod) — MIT. Schema validation in the MCP
+  adapter.
+
+Chat platforms are contacted over their documented public APIs using our own
+HTTP and WebSocket clients. No platform SDK is vendored.
+
+## Trademarks
+
+"opencode" is a trademark of its respective owner. "Claude" and "Anthropic" are
+trademarks of Anthropic, PBC. Telegram, Discord, and Slack are trademarks of their
+respective owners.
+
+opencode-rc uses these names **descriptively only**, to identify the software it
+integrates with and the platforms it connects to. We claim no affiliation with,
+endorsement by, or sponsorship from any of these projects or companies. Any
+inference to the contrary is mistaken.
+
+## Research documents
+
+The `docs/` directory contains the research that informed this design. Where
+those documents quote or summarise third-party material, the quotation is
+clearly attributed to its source and is used for analysis and commentary. The
+authors of the research are credited in the documents themselves.

@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.github.palmate09.opencode-rc</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/opencode-rc</string>
+        <string>run</string>
+        <string>--detach</string>
+        <string>--pid-file</string>
+        <string>/var/run/opencode-rc/opencode-rc.pid</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/opencode-rc.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/opencode-rc.error.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/var/lib/opencode-rc</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RC_OPENCODE_URL</key>
+        <string>http://127.0.0.1:4096</string>
+        <key>RC_STATE_DIR</key>
+        <string>/var/lib/opencode-rc</string>
+        <key>RC_LOG_LEVEL</key>
+        <string>info</string>
+    </dict>
+
+    <key>UserName</key>
+    <string>opencode-rc</string>
+
+    <key>GroupName</key>
+    <string>opencode-rc</string>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+        <key>NumberOfProcesses</key>
+        <integer>4096</integer>
+    </dict>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfProcesses</key>
+        <integer>4096</integer>
+    </dict>
+</dict>
+</plist>

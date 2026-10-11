@@ -1,0 +1,124 @@
+name: Bug report
+description: Something in opencode-rc does not work as documented
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **If this is a security vulnerability, do not file it here.**
+        Follow [SECURITY.md](https://github.com/palmate09/opencode-remote-control/blob/main/SECURITY.md) instead.
+        A public issue about an unfixed vulnerability costs you and every other
+        operator the protection of that report.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you see, and what did you expect instead?
+      placeholder: |
+        I sent `/new` and the bot replied "This conversation is not authorised yet",
+        but `rc access allow a1b2c3` says "No pending pairing with that code".
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The shortest sequence that shows the problem.
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: "bunx opencode-rc --version → 0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: adapter
+    attributes:
+      label: Which adapter
+      options:
+        - CLI
+        - Telegram
+        - Discord
+        - Slack
+        - Webhook
+        - MCP
+        - API
+        - None — core only
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: opencode-version
+    attributes:
+      label: opencode version
+      placeholder: "opencode --version → 1.18.35"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where is opencode running
+      options:
+        - Linux
+        - macOS
+        - Windows / WSL
+        - Raspberry Pi
+        - VPS
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: |
+        From `logs/app.log`. **Redact secrets first** — redaction runs before
+        every write, but a secret in an unusual format may survive it.
+      render: text
+      placeholder: |
+        2026-10-11T14:23:01.412Z INFO  [rc.opencode] event stream connected
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `rc doctor`
+      description: It checks opencode, the access policy and the audit chain.
+      render: text
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: |
+        **Redact every token, password and secret.** We only need to see which
+        settings are *set*, not their values.
+      render: text
+      placeholder: |
+        RC_TELEGRAM_ENABLED=true
+        RC_LOG_LEVEL=info
+        # tokens redacted
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched existing issues and this has not been reported
+          required: true
+        - label: I read the "Honest limitations" section of the README, and this is not one of the documented limits (sleep, Tailscale, opencode's own permissions)
+          required: true
+        - label: I have redacted tokens, passwords and secrets from everything above
+          required: true

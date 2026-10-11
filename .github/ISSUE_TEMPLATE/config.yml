@@ -1,0 +1,21 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/palmate09/opencode-remote-control/security/advisories/new
+    about: |
+      **Please report security issues privately**, not as a public issue or a
+      public pull request. We acknowledge within 72 hours and aim to fix within
+      90 days, coordinated with you. See SECURITY.md.
+
+  - name: Security policy and threat model
+    url: https://github.com/palmate09/opencode-remote-control/blob/main/SECURITY.md
+    about: |
+      How the security model works, what we do and do not defend against, and
+      the operator checklist.
+
+  - name: Question or discussion
+    url: https://github.com/palmate09/opencode-remote-control/discussions
+    about: |
+      "How do I…", "Is this safe?", "Does this work with…". Please check the
+      README and docs/ first — the honest limitations section answers most of
+      these.

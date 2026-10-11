@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "types": ["bun"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    "useUnknownInCatchVariables": true,
+
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+
+    "baseUrl": ".",
+    "paths": {
+      "@opencode-rc/core": ["./packages/core/src/index.ts"],
+      "@opencode-rc/core/*": ["./packages/core/src/*"],
+      "@opencode-rc/cli": ["./packages/cli/src/index.ts"],
+      "@opencode-rc/telegram": ["./packages/telegram/src/index.ts"],
+      "@opencode-rc/discord": ["./packages/discord/src/index.ts"],
+      "@opencode-rc/slack": ["./packages/slack/src/index.ts"],
+      "@opencode-rc/webhook": ["./packages/webhook/src/index.ts"],
+      "@opencode-rc/mcp": ["./packages/mcp/src/index.ts"],
+      "@opencode-rc/api": ["./packages/api/src/index.ts"]
+    }
+  },
+  "include": ["packages/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "dist", "**/dist"]
+}

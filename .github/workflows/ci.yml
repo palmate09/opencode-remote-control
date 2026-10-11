@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.0"
+
+      # --frozen-lockfile: a lockfile that can change itself is a supply-chain
+      # hole. If the lockfile is out of date, fail rather than silently updating.
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        run: bun run build
+
+      - name: Dependency licence audit
+        run: bun run deps:license
+
+      - name: Verify the audit-log chain
+        run: bun run audit:verify
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-rc-logs
+          path: |
+            logs/
+            **/logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  dco:
+    name: Developer Certificate of Origin
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check every commit is signed off
+        run: |
+          set -e
+          unsigned=$(git log --format='%H %s' \
+            --not "$(git merge-base HEAD origin/${{ github.base_ref }})" \
+            | grep -v 'Signed-off-by: ' || true)
+          if [ -n "$unsigned" ]; then
+            echo "::error::Commits without a DCO sign-off:"
+            echo "$unsigned"
+            echo ""
+            echo "Fix with: git rebase --signoff HEAD   (or amend the last commit)"
+            exit 1
+          fi
+          echo "All commits are signed off."
+
+  security:
+    name: Security posture
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.0"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: The security model must have tests
+        run: |
+          set -e
+          for suite in sanitize pairing permissions logger bridge adapters cli; do
+            if [ ! -f "tests/${suite}.test.ts" ]; then
+              echo "::error::tests/${suite}.test.ts is missing. Every claim in SECURITY.md is backed by a test."
+              exit 1
+            fi
+          done
+          echo "All security suites present."
+
+      - name: Adapters must not import the opencode SDK (Rule 1)
+        run: |
+          set -e
+          # Rule 1 (§5.2): adapters speak only to @opencode-rc/core. If this
+          # ever fails, an opencode API migration just became a seven-file change.
+          if grep -rn "@opencode-ai/sdk" packages/cli/src packages/telegram/src \
+             packages/discord/src packages/slack/src packages/webhook/src \
+             packages/mcp/src packages/api/src 2>/dev/null; then
+            echo "::error::An adapter imports @opencode-ai/sdk. Rule 1 (§5.2) is violated."
+            exit 1
+          fi
+          echo "No adapter imports the opencode SDK."
+
+      - name: Core must not know about any platform (Rule 2)
+        run: |
+          set -e
+          # Rule 2 (§5.2): platform identity is an opaque string. A platform name
+          # may appear in packages/core only inside a comment, or in a credential
+          # pattern — the sanitiser must name the token format it masks
+          # (`xoxb-…` is Slack, `sk-…` is not), which is data, not a dependency.
+          allowed='packages/core/src/(types|bridge|router|outbox|events|sanitize)\.ts:'
+          hits=$(grep -rniE '\b(telegram|discord|slack)\b' packages/core/src --include='*.ts' \
+                 | grep -vE ':\s*(//|\*| \*)' \
+                 | grep -vE "$allowed" || true)
+          if [ -n "$hits" ]; then
+            echo "::error::A platform name leaked into packages/core outside a comment or a credential pattern. Rule 2 (§5.2) is violated."
+            echo "$hits"
+            exit 1
+          fi
+          echo "Core stays platform-agnostic."

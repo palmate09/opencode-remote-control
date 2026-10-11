@@ -1,0 +1,32 @@
+{
+  "name": "opencode-rc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remote control for opencode — talk to your coding agent from your phone over Telegram, Discord, Slack, CLI, MCP or webhooks.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "bun run --filter='*' build",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "test": "bun test",
+    "audit:verify": "bun run packages/cli/src/bin.ts audit verify",
+    "deps:license": "bun run scripts/check-licenses.ts",
+    "check": "bun run lint && bun run typecheck && bun test && bun run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@types/bun": "1.1.14",
+    "typescript": "5.6.3"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "1.18.35",
+    "@modelcontextprotocol/sdk": "1.12.0"
+  }
+}
