@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "ignore": ["node_modules", "dist", "bun.lockb", "bun.lock"]
+    "ignore": ["node_modules", "dist", "bun.lockb", "bun.lock", ".opencode-rc"]
   },
   "formatter": {
     "enabled": true,
