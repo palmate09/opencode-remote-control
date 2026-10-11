@@ -1,0 +1,69 @@
+name: Feature request
+description: Suggest an adapter, a command, or a capability
+labels: ["enhancement", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        opencode-rc is deliberately small. Before asking for a feature, consider
+        whether it is one we have explicitly argued against:
+
+        - **A cloud relay / "send to my phone from anywhere" service.** We do not
+          build one. `opencode web` already ships an installable PWA, and Tailscale
+          reaches it from anywhere without us operating anything. See `README.md`
+          → "Honest limitations".
+        - **A mobile app.** Same answer. Do not rebuild what opencode already ships.
+        - **An inbound web endpoint by default.** Outbound-only is the property
+          that makes this safe to run. The webhook and API adapters are opt-in and
+          default to loopback.
+        - **WhatsApp, Signal or iMessage as first-class adapters.** All reverse-
+          engineered clients; WhatsApp carries a real number-ban risk. If you want
+          one anyway, the webhook path exists and that is the recommended route.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you cannot do today?
+      placeholder: |
+        When the agent is mid-run I cannot tell whether it is stuck or working,
+        so I keep interrupting it to ask.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: Sketch it. If you have already tried something, show what you tried.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: touches-security
+    attributes:
+      label: Does this change the security model?
+      description: |
+        Selecting anything but "no" routes this to every maintainer for
+        unanimous approval, and we will ask for a failing-then-passing test
+        (see [GOVERNANCE.md](https://github.com/palmate09/opencode-remote-control/blob/main/GOVERNANCE.md)).
+      options:
+        - "no — additive or cosmetic"
+        - "maybe — not sure"
+        - "yes — it affects who can reach the agent, what they can see, or what is logged"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including "do it myself" and "use an existing tool".
+    validations:
+      required: true
+
+  - type: textarea
+    id: contribute
+    attributes:
+      label: Would you implement it?
+      description: PRs are very welcome, especially new adapters. See [CONTRIBUTING.md](https://github.com/palmate09/opencode-remote-control/blob/main/CONTRIBUTING.md).

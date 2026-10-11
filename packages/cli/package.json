@@ -1,0 +1,23 @@
+{
+  "name": "@opencode-rc/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The rc command and the CLI adapter.",
+  "license": "MIT",
+  "bin": {
+    "opencode-rc": "./src/bin.ts",
+    "rc": "./src/bin.ts"
+  },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "echo \"cli ships TypeScript source; bun runs it directly\""
+  },
+  "dependencies": {
+    "@opencode-rc/core": "workspace:*"
+  }
+}

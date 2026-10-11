@@ -1,0 +1,4 @@
+# opencode-rc system user and group
+# Type  Name            ID  GECOS
+u       opencode-rc     -   "opencode-rc remote control bridge"
+g       opencode-rc     -   -
