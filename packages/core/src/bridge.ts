@@ -13,7 +13,8 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { join } from "node:path";
+import { realpath } from "node:fs/promises";
+import { basename, isAbsolute, join, resolve } from "node:path";
 
 import { loadAccess } from "./config.js";
 import { EventHub } from "./events.js";
@@ -26,7 +27,13 @@ import { PrivacyService } from "./privacy.js";
 import { Renderer } from "./renderer.js";
 import { Retention } from "./retention.js";
 import { Router } from "./router.js";
-import { sanitizeText } from "./sanitize.js";
+import {
+  RefusingToSendError,
+  assertSendable,
+  inlineFrameSafe,
+  safeName,
+  sanitizeText,
+} from "./sanitize.js";
 import { SessionStore } from "./sessions.js";
 import { ANTI_INJECTION_SYSTEM } from "./transport.js";
 import type { BridgeEvent, OpencodeTransport } from "./transport.js";
@@ -145,6 +152,10 @@ export class Bridge implements BridgeHandle {
         debug: opts.config.logRetentionDays,
         audit: opts.config.auditRetentionDays,
       },
+      // §8.5 — erasure must actually erase. Without this callback `/forget`
+      // removed session mappings but left every audit record for the actor on
+      // disk, so the export still returned them and the erasure was a lie.
+      purgeAuditForActor: (hashedId) => this.audit.purgeActor(hashedId),
     });
     this.retention = new Retention({
       logger: opts.logger.child("retention"),
@@ -154,6 +165,9 @@ export class Bridge implements BridgeHandle {
       auditRetentionDays: opts.config.auditRetentionDays,
       pairing: this.pairing,
       permissions: this.permissions,
+      // Let retention re-seat the live chain tail rather than rewrite the file
+      // underneath it. §8.6.
+      audit: this.audit,
       now: this.now,
     });
   }
@@ -299,6 +313,81 @@ export class Bridge implements BridgeHandle {
     }
     this.notificationsThisRun.set(key, sent + 1);
     this.outbox.push({ conversation, cards, ...(correlation ? { correlation } : {}) });
+  }
+
+  /**
+   * §7.4 layer 6 — relay a file, subject to the state-exfiltration guard.
+   *
+   * The guard is the reason this is a bridge method and not something an adapter
+   * does itself: it must run before *any* adapter sees the path, so no adapter
+   * can be the weak link. `access.json`, `.env`, the audit salt and everything
+   * else under the state directory are refused here or nowhere.
+   */
+  async sendFile(
+    conversation: { platform: string; chatId: string; threadId?: string },
+    path: string,
+    caption?: string,
+  ): Promise<boolean> {
+    const adapter = this.adapter;
+    if (!adapter?.capabilities.files || !adapter.sendFile) {
+      await this.deliver(conversation, [
+        {
+          kind: "notice",
+          text: "Sending files is not supported by this adapter.",
+        },
+      ]);
+      return false;
+    }
+
+    let real: string;
+    try {
+      await assertSendable(path, this.config.stateDir, { mustExist: true });
+      // Adapters open the file themselves, so hand them an absolute, symlink-
+      // resolved path — the same one the guard just approved.
+      real = await realpath(path).catch(() => resolve(path));
+    } catch (err) {
+      const reason = err instanceof RefusingToSendError ? err.message : String(err);
+      this.audit.append({
+        event: "file.send_refused",
+        outcome: "drop",
+        ns: "sanitize",
+        fields: { reason, path: safeName(path, 200) },
+      });
+      await this.deliver(conversation, [
+        {
+          kind: "notice",
+          text: "Refused to send that file: it is inside the state directory, which holds credentials and the audit log. Put files to share in the state `inbox/` directory.",
+        },
+      ]);
+      return false;
+    }
+
+    const name = safeName(basename(real), 120) || "file";
+    this.audit.append({
+      event: "file.sent",
+      outcome: "allow",
+      ns: "bridge",
+      fields: { name, path: safeName(real, 200) },
+    });
+    try {
+      await adapter.sendFile(conversation, {
+        path: real,
+        name,
+        ...(caption ? { caption: sanitizeText(caption, 500) } : {}),
+      });
+      return true;
+    } catch (err) {
+      this.audit.append({
+        event: "file.send_failed",
+        outcome: "error",
+        ns: "bridge",
+        fields: { name, error: sanitizeText(String(err), 300) },
+      });
+      await this.deliver(conversation, [
+        { kind: "error", message: `Could not send the file: ${sanitizeText(String(err), 300)}` },
+      ]);
+      return false;
+    }
   }
 
   // ── inbound ──────────────────────────────────────────────────────────────
@@ -610,12 +699,16 @@ export class Bridge implements BridgeHandle {
           ]);
           return;
         }
+        // §7.4 layer 4 — the title comes from `/new <title>`, so it is attacker-
+        // controlled. `sanitizeText` folds whitespace but preserves `\n`, so a
+        // title could forge an adjacent row; `inlineFrameSafe` collapses the
+        // newline to a visible ⏎ marker instead.
         const lines = list
           .slice(0, 20)
           .map(
             (b) =>
-              `${b.busy ? "●" : "○"} \`${sanitizeText(b.sessionId, 40)}\` ${sanitizeText(b.title, 60)}` +
-              ` — ${sanitizeText(b.conversation.chatId, 40)}`,
+              `${b.busy ? "●" : "○"} \`${inlineFrameSafe(b.sessionId, 40)}\` ${inlineFrameSafe(b.title, 60)}` +
+              ` — ${inlineFrameSafe(b.conversation.chatId, 40)}`,
           );
         await this.deliver(chat, [{ kind: "text", markdown: `Sessions:\n${lines.join("\n")}` }]);
         return;
@@ -760,6 +853,24 @@ export class Bridge implements BridgeHandle {
             text: dropped ? `Dropped ${dropped} queued message(s).` : "Nothing queued.",
           },
         ]);
+        return;
+      }
+
+      case "send": {
+        const raw = args.join(" ").trim();
+        if (!raw) {
+          await this.deliver(chat, [
+            {
+              kind: "notice",
+              text: "Usage: `/send <path>`. A relative path is resolved against the state `inbox/` directory. Files elsewhere are refused unless they exist and are outside the state directory.",
+            },
+          ]);
+          return;
+        }
+        // A relative path is relative to inbox/, which is the one part of the
+        // state directory the guard permits.
+        const path = isAbsolute(raw) ? raw : join(this.config.stateDir, "inbox", raw);
+        await this.sendFile(chat, path);
         return;
       }
 

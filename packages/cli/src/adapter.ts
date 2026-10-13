@@ -24,6 +24,9 @@ export const CLI_CAPABILITIES: AdapterCapabilities = {
   permissionRelay: true,
   threads: false,
   richCards: true,
+  // A terminal cannot "upload" a file; it prints the path. Declared false so
+  // the bridge says so plainly instead of silently dropping a /send.
+  files: false,
 };
 
 const CLI_PLATFORM = "cli";

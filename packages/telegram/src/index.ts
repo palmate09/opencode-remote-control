@@ -27,6 +27,8 @@ export const TELEGRAM_CAPABILITIES: AdapterCapabilities = {
   permissionRelay: true,
   threads: false,
   richCards: true,
+  // sendDocument uploads the file; the Bot API cap is ~20 MB.
+  files: true,
 };
 
 /** §10.1 — verified platform limits. */
@@ -175,6 +177,34 @@ export class TelegramAdapter implements Adapter {
     this.running = true;
     ctx.audit.append({ event: "adapter.start", ns: "telegram", fields: { botId: this.botId } });
     void this.pollLoop();
+  }
+
+  /**
+   * Upload a document. Uses multipart/form-data, which `call()` cannot express
+   * (it sends JSON), so this is a separate path.
+   *
+   * The bridge has already run the exfiltration guard; this only has to make
+   * the request. The basename, not the caller-supplied path, names the upload.
+   */
+  async sendFile(
+    conversation: { platform: string; chatId: string },
+    file: { path: string; name: string; caption?: string },
+  ): Promise<void> {
+    const chatId = Number(conversation.chatId);
+    if (!Number.isFinite(chatId)) return;
+    const bytes = await Bun.file(file.path).arrayBuffer();
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    if (file.caption) form.set("caption", escapeMarkdownV2(file.caption));
+    form.set("document", new Blob([bytes]), file.name);
+    const res = await this.fetchImpl(`${this.apiBase}/bot${this.token}/sendDocument`, {
+      method: "POST",
+      body: form,
+    });
+    const json = (await res.json().catch(() => ({}))) as { ok?: boolean; description?: string };
+    if (!res.ok || json.ok === false) {
+      throw new Error(`telegram sendDocument failed: ${json.description ?? res.status}`);
+    }
   }
 
   async stop(): Promise<void> {

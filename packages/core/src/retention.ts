@@ -6,18 +6,11 @@
  * leave stale records on disk for as long as the machine was off.
  */
 
-import {
-  existsSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import type { Logger } from "./logger.js";
+import { purgeAuditFile } from "./logger.js";
 import type { PairingStore } from "./pairing.js";
 import type { PermissionRegistry } from "./permissions.js";
 
@@ -35,6 +28,15 @@ export interface RetentionOptions {
   readonly auditRetentionDays: number;
   readonly pairing: PairingStore;
   readonly permissions: PermissionRegistry;
+  /**
+   * The live audit log, when one exists.
+   *
+   * Preferred over rewriting the file directly: the bridge holds an `AuditLog`
+   * with an in-memory chain tail, and a purge that only touched the file would
+   * leave that tail pointing at a record that no longer exists. Passing the
+   * instance lets it re-seat itself so the next append continues the new chain.
+   */
+  readonly audit?: import("./logger.js").AuditLog;
   readonly intervalMs?: number;
   readonly now?: () => number;
 }
@@ -96,36 +98,26 @@ export class Retention {
   }
 
   /**
-   * Rewrites the audit log keeping only records inside the window. This is the
-   * one place we rewrite an append-only file, and it is done atomically with a
-   * `.purge` temp file so a crash mid-rewrite cannot corrupt the chain.
+   * Drops records outside the window and **re-anchors** the chain, so a purge
+   * does not make `rc audit verify` report a break it caused itself.
+   *
+   * `purgeAuditFile` owns the atomic rewrite (`<path>.purge` + rename); this is
+   * only the retention policy on top of it. Retention holds the path rather than
+   * a live `AuditLog` on purpose: a second in-memory tail would drift from the
+   * file the moment a purge happened.
    */
   private rewriteAudit(cutoff: number): number {
-    const path = this.opts.auditPath;
-    if (!existsSync(path)) return 0;
-    const lines = readFileSync(path, "utf8")
-      .split("\n")
-      .filter((l) => l.trim());
-    const keep: string[] = [];
-    let dropped = 0;
-    for (const line of lines) {
-      try {
-        const rec = JSON.parse(line) as { ts: string };
-        if (Date.parse(rec.ts) < cutoff) {
-          dropped++;
-          continue;
-        }
-        keep.push(line);
-      } catch {
-        dropped++;
-      }
-    }
-    if (dropped === 0) return 0;
-    const tmp = `${path}.purge`;
-    writeFileSync(tmp, keep.length ? `${keep.join("\n")}\n` : "", { mode: 0o600 });
-    renameSync(tmp, path);
-    this.opts.logger.info("audit log purged", { removed: dropped, kept: keep.length });
-    return dropped;
+    const predicate = (rec: { ts: string }): boolean => {
+      const t = Date.parse(rec.ts);
+      return Number.isFinite(t) && t < cutoff;
+    };
+    // A live AuditLog re-seats its own tail; without one, rewrite the file and
+    // rely on the next process to read the re-anchored head.
+    const removed = this.opts.audit
+      ? this.opts.audit.purge(predicate)
+      : purgeAuditFile(this.opts.auditPath, predicate).removed;
+    if (removed > 0) this.opts.logger.info("audit log purged and re-chained", { removed });
+    return removed;
   }
 
   start(): void {

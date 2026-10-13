@@ -35,6 +35,7 @@ let stateDir: string;
 let transport: FakeTransport;
 let bridge: Bridge;
 let sent: { conversation: string; cards: Card[] }[];
+let recording: RecordingAdapter;
 
 /** Records everything the bridge relays, so assertions can read it. */
 class RecordingAdapter implements Adapter {
@@ -45,7 +46,11 @@ class RecordingAdapter implements Adapter {
     permissionRelay: true,
     threads: false,
     richCards: true,
+    files: true,
   } as const;
+
+  /** Files the bridge relayed, so the exfiltration guard can be asserted. */
+  readonly files: { path: string; name: string }[] = [];
 
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
@@ -54,6 +59,9 @@ class RecordingAdapter implements Adapter {
       conversation: `${msg.conversation.chatId}${msg.conversation.threadId ? `:${msg.conversation.threadId}` : ""}`,
       cards: [...msg.cards],
     });
+  }
+  async sendFile(_c: unknown, file: { path: string; name: string }): Promise<void> {
+    this.files.push({ path: file.path, name: file.name });
   }
 }
 
@@ -74,13 +82,14 @@ function build(
 
   transport = new FakeTransport();
   const logger = testLogger(stateDir);
+  recording = new RecordingAdapter();
   bridge = new Bridge({
     config: testConfig(stateDir),
     logger,
     salt: "test-salt-0000000000000000",
     transport,
     now: () => Date.now(),
-    adapter: new RecordingAdapter(),
+    adapter: recording,
     // Tests assert on delivery synchronously; the real 1.1s per-chat floor
     // would make every multi-message assertion a 30-second suite.
     minGapMs: 0,
@@ -901,6 +910,38 @@ describe("§8.5 — data subject rights", () => {
     expect(JSON.parse(bridge.privacy.exportData(actor)).sessions).toHaveLength(0);
   });
 
+  test("/forget actually erases the actor's audit records, and the chain survives", async () => {
+    // The GDPR Art. 17 promise is executed, not merely reported. Before this
+    // was wired up, `auditRemoved` was always 0 and `/export` still returned the
+    // actor's records after a `/forget`.
+    build({ allowFrom: ["test:user-1"] });
+    await bridge.start();
+    await bridge.handle(msg({ text: "hello" }));
+    const actor = { platform: "test", id: "user-1" };
+    const hashed = bridge.audit.hashActor(actor);
+    expect(bridge.audit.read({ actor: hashed }).length).toBeGreaterThan(0);
+
+    const result = bridge.privacy.forget(actor);
+    expect(result.auditRemoved).toBeGreaterThan(0);
+
+    // The actor's records are gone from disk, except the erasure request itself
+    // — Art. 5(2) accountability requires the operator can prove it was handled.
+    const remaining = bridge.audit.read({ actor: hashed });
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]!.event).toBe("privacy.forget");
+
+    // A fresh `/export` no longer returns the pre-erasure history.
+    const exported = (
+      JSON.parse(bridge.privacy.exportData(actor)) as { audit: { event: string }[] }
+    ).audit;
+    expect(exported.some((r) => r.event === "message.received")).toBe(false);
+
+    // ...and re-anchoring means `verify` still passes rather than reporting a
+    // break the purge caused itself.
+    const after = verifyChain(join(stateDir, "logs", "audit.jsonl"));
+    expect(after.ok).toBe(true);
+  });
+
   test("message bodies never reach the audit log", async () => {
     build({ allowFrom: ["test:user-1"] });
     await bridge.start();
@@ -929,6 +970,156 @@ describe("§8.5 — data subject rights", () => {
     expect(notice).toContain("you, the person running this instance, are the controller");
     expect(notice).toContain("no telemetry");
     expect(notice).toContain("Message bodies are never written to our");
+  });
+});
+
+describe("§7.4 layer 6 — file relay runs the exfiltration guard", () => {
+  async function writeInbox(name: string, body = "hello"): Promise<string> {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const dir = join(stateDir, "inbox");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, name);
+    writeFileSync(path, body);
+    return path;
+  }
+
+  test("a file in inbox/ is relayed to the adapter", async () => {
+    build({ allowFrom: ["test:user-1"] });
+    await bridge.start();
+    const path = await writeInbox("notes.txt");
+
+    const ok = await bridge.sendFile(msg().chat, path);
+    expect(ok).toBe(true);
+    expect(recording.files).toHaveLength(1);
+    expect(recording.files[0]!.name).toBe("notes.txt");
+  });
+
+  test("a file in the state directory is refused and never reaches the adapter", async () => {
+    build({ allowFrom: ["test:user-1"] });
+    await bridge.start();
+    const { writeFileSync } = await import("node:fs");
+    const secret = join(stateDir, "access.json");
+    writeFileSync(secret, "{}");
+
+    const ok = await bridge.sendFile(msg().chat, secret);
+    expect(ok).toBe(false);
+    expect(recording.files).toHaveLength(0);
+
+    // The refusal is audited — an attempt to exfiltrate is a security event.
+    const raw = await Bun.file(join(stateDir, "logs", "audit.jsonl")).text();
+    expect(raw).toContain("file.send_refused");
+  });
+
+  test("a path outside the state directory that does not exist is refused", async () => {
+    build({ allowFrom: ["test:user-1"] });
+    await bridge.start();
+    const ok = await bridge.sendFile(msg().chat, "/nonexistent/definitely-missing-xyz");
+    expect(ok).toBe(false);
+    expect(recording.files).toHaveLength(0);
+  });
+
+  test("/send routes through the command path and relays an inbox file", async () => {
+    // The whole path a user actually types: router → runCommand → sendFile →
+    // guard → adapter. Not just sendFile() in isolation.
+    build({ allowFrom: ["test:user-1"] });
+    await bridge.start();
+    await writeInbox("via-command.txt");
+
+    await bridge.handle(msg({ text: "/send via-command.txt" }));
+    expect(recording.files).toHaveLength(1);
+    expect(recording.files[0]!.name).toBe("via-command.txt");
+    // A relative path resolves against inbox/, not the process cwd.
+    expect(recording.files[0]!.path.startsWith(join(stateDir, "inbox"))).toBe(true);
+  });
+
+  test("/send on a state-directory path is refused end to end", async () => {
+    build({ allowFrom: ["test:user-1"] });
+    await bridge.start();
+    const secret = join(stateDir, "consent.json");
+    const { writeFileSync: write } = await import("node:fs");
+    write(secret, "{}");
+
+    await bridge.handle(msg({ text: `/send ${secret}` }));
+    expect(recording.files).toHaveLength(0);
+
+    const raw = await Bun.file(join(stateDir, "logs", "audit.jsonl")).text();
+    expect(raw).toContain("file.send_refused");
+  });
+
+  test("/send with no argument prints usage instead of guessing a path", async () => {
+    build({ allowFrom: ["test:user-1"] });
+    await bridge.start();
+    sent = [];
+    await bridge.handle(msg({ text: "/send" }));
+    await tick(20);
+    expect(recording.files).toHaveLength(0);
+    expect(texts().join("\n")).toContain("Usage");
+  });
+
+  test("an adapter that cannot send files says so rather than dropping it", async () => {
+    build({ allowFrom: ["test:user-1"] });
+    // A second bridge whose adapter cannot send files.
+    const noFiles: Adapter = {
+      id: "test",
+      displayName: "Test",
+      capabilities: {
+        messaging: true,
+        permissionRelay: true,
+        threads: false,
+        richCards: true,
+        files: false,
+      },
+      start: async () => {},
+      stop: async () => {},
+      send: async (m) => {
+        sent.push({ conversation: m.conversation.chatId, cards: [...m.cards] });
+      },
+    };
+    const path = await writeInbox("x.txt");
+    const restarted = new Bridge({
+      config: testConfig(stateDir),
+      logger: testLogger(stateDir),
+      salt: "test-salt-0000000000000000",
+      transport,
+      adapter: noFiles,
+      minGapMs: 0,
+    });
+    await restarted.start();
+    sent = [];
+    const ok = await restarted.sendFile(msg().chat, path);
+    expect(ok).toBe(false);
+    await tick(20);
+    expect(texts().join("\n")).toContain("not supported");
+    await restarted.stop();
+  });
+});
+
+describe("§7.4 layer 4 — a title cannot forge an adjacent row", () => {
+  test("/sessions renders a newline in a session title as a visible marker", async () => {
+    // Session titles can originate from opencode itself (session.created), not
+    // only from `/new`, and the router's arg-splitting only sanitises the chat
+    // path. A title carrying a newline must not be able to forge a row.
+    build({ allowFrom: ["test:user-1"] });
+    await bridge.start();
+
+    const chat = msg().chat;
+    bridge.sessions.bind(chat, "ses_0001", "innocent\n● ses_REAL — approved");
+    bridge.sessions.bind(
+      msg({ chat: { platform: "test", chatId: "dm:other" } }).chat,
+      "ses_0002",
+      "other",
+    );
+
+    sent = [];
+    await bridge.handle(msg({ text: "/sessions" }));
+    await tick(20);
+
+    const out = texts().join("\n");
+    // The newline became a marker, so the injected line is not its own row.
+    expect(out).toContain("⏎");
+    // Two real sessions, each on exactly one row.
+    const rows = out.split("\n").filter((l) => l.includes("ses_"));
+    expect(rows.length).toBe(2);
   });
 });
 

@@ -186,6 +186,7 @@ In chat:
 |---|---|
 | `/new [title]` | Start a fresh session |
 | `/sessions` · `/status` · `/diff` | Inspect the current work |
+| `/send <path>` | Relay a file to the chat (refuses anything inside the state dir except `inbox/`) |
 | `/abort` | Stop the current run — always works |
 | `/model <provider/model>` | Pick a model |
 | `btw <text>` | Queue a follow-up for when the current run finishes |
@@ -268,7 +269,8 @@ third-party client cannot affect Telegram, Discord or Slack. See
 | CLI adapter, `rc` commands | Full |
 | Telegram transport | Against a fake Bot API over real HTTP on loopback |
 | API + webhook adapters | Real HTTP servers, real requests, real SSE |
-| Discord, Slack, MCP transports | **Payload parsing and card rendering only — no transport-level test** |
+| Discord interactions endpoint | Real HTTP server, real Ed25519 signatures — forged taps are rejected |
+| Discord, Slack, MCP **gateway/socket** transports | **Payload parsing and card rendering only — no transport-level test** |
 
 **No test needs a live agent, a bot token, or network egress.** That is
 deliberate: a suite that needs infrastructure is a suite nobody runs.

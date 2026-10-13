@@ -6,6 +6,8 @@
  * Telegram message looks like.
  */
 
+import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
+
 import type { Adapter } from "@opencode-rc/core";
 import { Bridge, PreconditionError, createLogger, loadConfig } from "@opencode-rc/core";
 
@@ -18,9 +20,7 @@ export interface RunOptions {
   readonly skipPreconditions?: boolean;
   /** Adapters to enable in addition to whatever env selects. */
   readonly extra?: Adapter[];
-  /** Run in background as a daemon. */
-  readonly detach?: boolean;
-  /** PID file path when running detached. */
+  /** PID file to write once the bridge is up. */
   readonly pidFile?: string;
 }
 
@@ -32,6 +32,84 @@ export interface RunHandle {
 
 /** §10.3 — SIGTERM → SIGKILL after 30s. */
 export const SHUTDOWN_GRACE_MS = 30_000;
+
+export interface DetachResult {
+  /** The daemon's pid, once it has written the pid file (or the spawn pid). */
+  readonly pid: number | undefined;
+  /** stderr from the daemon child, for an honest startup failure message. */
+  readonly stderr: string;
+  readonly exitCode: number | null;
+}
+
+/**
+ * Marker in the child's environment. The daemon runs the *same* command, so
+ * without this it would detach again, forever. Checking the environment rather
+ * than sniffing argv means the child is indistinguishable from a foreground run
+ * to everything downstream.
+ */
+const DETACHED_ENV = "RC_DETACHED";
+
+export function isDetachChild(env: Record<string, string | undefined> = process.env): boolean {
+  return env[DETACHED_ENV] === "1";
+}
+
+/**
+ * Re-exec this command as a background daemon.
+ *
+ * The previous implementation wrote a shell script to `/tmp` that never
+ * re-executed anything and then called `process.exit(0)` on the already-running
+ * bridge — so `rc run --detach` started a foreground bridge, printed success,
+ * and killed it. This spawns a genuinely detached child (`detached`, its own
+ * session via `setsid` semantics, stdio to files), waits briefly for the pid
+ * file, and returns so the parent exits.
+ *
+ * `Bun.spawn` (not `spawnSync`) is required: the child is long-lived.
+ */
+export async function daemonizeSpawn(
+  args: readonly string[],
+  opts: { pidFile?: string; env?: Record<string, string | undefined> } = {},
+): Promise<DetachResult> {
+  const env = { ...(opts.env ?? process.env), [DETACHED_ENV]: "1" };
+  const errFile = opts.pidFile ? `${opts.pidFile}.err` : undefined;
+  // Bun.spawn takes a file descriptor for stdio, not a path. Capture the
+  // child's stderr so a fatal startup error surfaces before we claim success.
+  const errFd = errFile ? openSync(errFile, "w") : -1;
+
+  const proc = Bun.spawn([process.execPath, ...process.argv.slice(1)], {
+    env,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: errFile ? errFd : "ignore",
+    // New session, no controlling terminal: the daemon survives the parent.
+    detached: true,
+  });
+
+  // The child holds its own dup of the fd; ours is no longer needed.
+  if (errFd >= 0) closeSync(errFd);
+
+  // Wait for the daemon to write its pid file so we can report a real pid,
+  // and so a fatal startup error surfaces before we claim success.
+  let pid = proc.pid;
+  const deadline = Date.now() + 1500;
+  while (opts.pidFile && Date.now() < deadline) {
+    await sleep(50);
+    if (existsSync(opts.pidFile)) {
+      const raw = readFileSync(opts.pidFile, "utf8").trim();
+      const parsed = Number.parseInt(raw, 10);
+      if (Number.isFinite(parsed)) pid = parsed;
+      break;
+    }
+    if (proc.exitCode !== null) break;
+  }
+
+  const stderr = errFile && existsSync(errFile) ? readFileSync(errFile, "utf8").trim() : "";
+  void args; // reserved for future argv adjustments
+  return { pid, stderr, exitCode: proc.exitCode ?? null };
+}
+
+export function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 export async function runBridge(opts: RunOptions = {}): Promise<RunHandle> {
   const { config, salt } = loadConfig({
@@ -84,8 +162,16 @@ export async function runBridge(opts: RunOptions = {}): Promise<RunHandle> {
     }
   }
 
-  if (opts.detach) {
-    await daemonize(opts.pidFile, logger);
+  // Record our pid once the bridge is actually up. The detached parent that
+  // spawned us waits for this file to report a real pid; a foreground run with an
+  // explicit --pid-file is useful for service managers too.
+  if (opts.pidFile) {
+    try {
+      writeFileSync(opts.pidFile, `${process.pid}\n`, { mode: 0o600 });
+      logger.info("wrote pid file", { pidFile: opts.pidFile, pid: process.pid });
+    } catch (err) {
+      logger.warn("could not write pid file", { pidFile: opts.pidFile, error: String(err) });
+    }
   }
 
   let stopping = false;
@@ -116,56 +202,6 @@ export async function runBridge(opts: RunOptions = {}): Promise<RunHandle> {
   }
 
   return { bridge, adapters, stop };
-}
-
-/**
- * Double-fork daemonization. Detaches from the controlling terminal,
- * redirects stdio to /dev/null, and writes the daemon PID to a file.
- */
-async function daemonize(
-  pidFile?: string,
-  logger?: ReturnType<typeof createLogger>,
-): Promise<void> {
-  const log = logger?.child("daemonize") ?? console;
-
-  // Write a simple daemonization script
-  const script = [
-    "#!/bin/sh",
-    "# Double-fork daemonization for opencode-rc",
-    "# Usage: $0 [pid-file]",
-    "",
-    "# First fork",
-    "if [ $$ -ne 1 ]; then",
-    "  exec setsid sh -c '",
-    "    # Second fork - grandchild becomes daemon",
-    "    if [ $$ -ne 1 ]; then",
-    "      # Grandchild: daemon process",
-    "      exec 0</dev/null",
-    "      exec 1>/dev/null",
-    "      exec 2>/dev/null",
-    '      echo $$ > "${1:-/dev/null}"',
-    '      exec "$0" "$@"',
-    "    fi",
-    '  \' -- "$@"',
-    ") &",
-    "",
-  ].join("\n");
-
-  const scriptPath = "/tmp/opencode-rc-daemonize.sh";
-  await Bun.write(scriptPath, script, { mode: 0o755 });
-
-  const result = Bun.spawnSync(["sh", scriptPath, pidFile ?? "/dev/null"], {
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-
-  if (pidFile) {
-    // Wait for daemon to write PID file
-    await new Promise((r) => setTimeout(r, 200));
-  }
-
-  log.info("daemonized", { pid: process.pid, pidFile });
-  process.exit(0);
 }
 
 /** The CLI is the default adapter: cheapest, and the best core debugger. */

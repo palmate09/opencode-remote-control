@@ -22,19 +22,22 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+import { join } from "node:path";
 import type {
   Adapter,
   AdapterCapabilities,
   AdapterContext,
   OutboundMessage,
 } from "@opencode-rc/core";
-import { sanitizeText } from "@opencode-rc/core";
+import { sanitizeText, verifyChain } from "@opencode-rc/core";
 
 export const MCP_CAPABILITIES: AdapterCapabilities = {
   messaging: true,
   permissionRelay: true,
   threads: true,
   richCards: true,
+  // MCP tools return text; there is no file-upload primitive in the adapter.
+  files: false,
 };
 
 const MCP_PLATFORM = "mcp";
@@ -171,7 +174,9 @@ export class McpAdapter implements Adapter {
       "Verify the hash chain of the audit log. Reports the exact record where tampering was detected.",
       {},
       async () => {
-        const result = verifyAuditChain(ctx);
+        // Core owns the chain format; re-implementing it here once meant the
+        // content-hash check was missing and a tampered record could verify OK.
+        const result = verifyChain(join(ctx.config.stateDir, "logs", "audit.jsonl"));
         return {
           content: [
             {
@@ -220,23 +225,6 @@ export class McpAdapter implements Adapter {
   transcript(): readonly string[] {
     return this.log;
   }
-}
-
-function verifyAuditChain(ctx: AdapterContext): {
-  ok: boolean;
-  records: number;
-  brokenAt: number | null;
-  reason: string | null;
-} {
-  const audits = ctx.audit.read();
-  let prev = audits[0]?.prev ?? null;
-  for (const rec of audits) {
-    if (prev !== null && rec.prev !== prev) {
-      return { ok: false, records: audits.length, brokenAt: rec.seq, reason: "prev-hash mismatch" };
-    }
-    prev = rec.hash ?? null;
-  }
-  return { ok: true, records: audits.length, brokenAt: null, reason: null };
 }
 
 function privacyNotice(ctx: AdapterContext): string {

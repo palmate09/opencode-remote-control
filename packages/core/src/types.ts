@@ -107,6 +107,12 @@ export interface AdapterCapabilities {
   readonly threads: boolean;
   /** Rich card rendering (diff, status, markdown). */
   readonly richCards: boolean;
+  /**
+   * Can relay a file to the conversation. The bridge runs the §7.4 layer 6
+   * exfiltration guard before calling `sendFile`, but an adapter that cannot
+   * upload must say so here rather than silently dropping the request.
+   */
+  readonly files: boolean;
 }
 
 export interface AdapterContext {
@@ -136,8 +142,25 @@ export interface Adapter {
   send(msg: OutboundMessage): Promise<void>;
   /** Edit or replace a previously sent "live" message, if the platform allows. */
   edit?(conversation: ConversationRef, messageId: string, cards: readonly Card[]): Promise<void>;
+  /**
+   * Upload a file to the conversation. Required only when
+   * `capabilities.files` is true. The bridge has already run the §7.4 layer 6
+   * exfiltration guard by the time this is called, but an adapter MUST NOT rely
+   * on that alone — re-check if the platform gives it a cheaper signal.
+   */
+  sendFile?(conversation: ConversationRef, file: OutboundFile): Promise<void>;
   /** Optional low-level access used by tests and the CLI adapter. */
   handle?(message: InboundMessage): Promise<void>;
+}
+
+/** A file on its way out, after the exfiltration guard has approved it. */
+export interface OutboundFile {
+  /** Absolute, realpath-resolved path. */
+  readonly path: string;
+  /** Sanitised basename, safe to show in a chat. */
+  readonly name: string;
+  readonly bytes?: number;
+  readonly caption?: string;
 }
 
 export interface BridgeHandle {
@@ -167,6 +190,12 @@ export interface BridgeHandle {
     verdict: PermissionVerdict,
     actor?: Actor,
   ): Promise<boolean>;
+  /**
+   * Relay a file to the conversation, subject to the §7.4 layer 6 exfiltration
+   * guard. Returns `false` (and delivers a notice) when the path is refused or
+   * the adapter cannot send files.
+   */
+  sendFile(conversation: ConversationRef, path: string, caption?: string): Promise<boolean>;
 }
 
 export interface PromptOptions {

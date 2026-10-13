@@ -45,6 +45,7 @@ export const COMMANDS = [
   "btw",
   "cancel",
   "start",
+  "send",
 ] as const;
 
 export type CommandName = (typeof COMMANDS)[number];
@@ -148,6 +149,11 @@ export class Router {
         summary: "Queue a follow-up for when the current run finishes",
       },
       { name: "cancel", usage: `${this.prefix}cancel`, summary: "Drop the queued follow-up" },
+      {
+        name: "send",
+        usage: `${this.prefix}send <path>`,
+        summary: "Relay a file from inbox/ to this chat",
+      },
       { name: "privacy", usage: `${this.prefix}privacy`, summary: "What data is held about you" },
       {
         name: "export",

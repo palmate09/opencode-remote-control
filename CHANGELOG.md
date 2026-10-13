@@ -11,6 +11,48 @@ patches are safe.
 
 ---
 
+## [Unreleased]
+
+A hardening pass over 0.1.0, driven by auditing the code against the claims in
+`PLAN.md`, `SECURITY.md` and the README. Every item below is a case where the
+documentation promised something the code did not do.
+
+### Fixed
+
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| 1 | `/forget` reported `0` audit records removed; a later `/export` still returned them | `PrivacyService` accepted an optional `purgeAuditForActor` callback that `Bridge` never supplied | Wired to `AuditLog.purgeActor`; erasure is now executed, not just claimed (`tests/bridge.test.ts`) |
+| 2 | `rc audit verify` failed on any install older than the retention window | `Retention` deleted old lines, leaving the first survivor pointing at a removed `prev` hash | `purgeAuditFile` re-anchors survivors with contiguous `seq` and recomputed hashes, atomically (`tests/logger.test.ts`) |
+| 3 | Audit appends after a purge wrote a dangling `prev` and broke the chain | Retention rewrote the file behind the live `AuditLog`'s back | `Retention` now takes the live `AuditLog` and re-seats its tail |
+| 4 | `rc run --detach` started a foreground bridge, printed success, and killed it | `daemonize` wrote a `/tmp` script whose `exec "$0"` resolved to `--`, then `process.exit(0)`'d the running process | `daemonizeSpawn` re-execs the real command with `detached: true` and `RC_DETACHED=1`; verified end to end |
+| 5 | Discord's Ed25519 verifier could never validate anything | `createVerify("ed25519")` throws `Invalid digest` | Correct SPKI-wrapped `node:crypto` verification over `timestamp ‖ rawBody`, plus a signature-checked HTTP interactions endpoint (`tests/discord.test.ts`) |
+| 6 | Discord interactions could be answered over the Gateway with no signature | `INTERACTION_CREATE` was handled on the WebSocket, an unauthenticated path to `answerPermission` | Route removed; interactions arrive only at the verified endpoint |
+| 7 | MCP's `rc_audit_verify` skipped the content-hash check | A second, incomplete `verifyChain` lived in the adapter | Delegates to core's `verifyChain` |
+| 8 | The state-exfiltration guard and `inlineFrameSafe` were dead code | No file-relay or multi-row-fetched-history path existed to call them | `/send <path>` relays files through `assertSendable` before any adapter sees a path; `/sessions` rows are frame-safe |
+
+### Added
+
+- **`/send <path>`** — relays a file to the chat. Relative paths resolve against
+  the state `inbox/`; anything else inside the state directory is refused and
+  audited. Adapters declare a new `files` capability honestly: telegram,
+  discord, slack and api implement `sendFile`; cli, webhook and mcp do not and
+  say so.
+- **`tests/discord.test.ts`** — 9 tests driving the interactions endpoint over
+  real HTTP with a real Ed25519 keypair, including the capture-and-swap forgery
+  that SECURITY.md previously said we could not defend against.
+
+### Changed
+
+- `AdapterCapabilities` gains a required `files: boolean`, and `Adapter` an
+  optional `sendFile`. Pre-1.0, so this is a breaking change for any external
+  adapter.
+- `BridgeHandle` gains `sendFile`. Breaking for test doubles and external
+  callers.
+- SECURITY.md's "Untested surface" now scopes the untested part of Discord to
+  the **Gateway message socket**; the interactions endpoint is covered.
+
+---
+
 ## [0.1.0] — 2026-10-11
 
 First release. Verified end-to-end against a live opencode **1.18.35** server:

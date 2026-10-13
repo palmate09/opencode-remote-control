@@ -8,7 +8,7 @@ import { type Adapter, loadConfig } from "@opencode-rc/core";
 import { CliAdapter } from "./adapter.ts";
 import { loadOptionalAdapters } from "./adapters.ts";
 import { runAccess, runAudit, runConsent, runDoctor, runInit } from "./commands.ts";
-import { runBridge } from "./run.ts";
+import { daemonizeSpawn, isDetachChild, runBridge } from "./run.ts";
 
 const VERSION = "0.1.0";
 
@@ -127,9 +127,34 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "run": {
-      const { adapters, names } = await loadOptionalAdapters(
+      const pidFile = args.includes("--pid-file")
+        ? args[args.indexOf("--pid-file") + 1]
+        : undefined;
+      const detach = args.includes("--detach");
+
+      // Detaching spawns the same command in the background and the parent
+      // exits. The child carries RC_DETACHED=1, so it falls through to the
+      // normal foreground path instead of detaching again.
+      if (detach && !isDetachChild()) {
+        const result = await daemonizeSpawn(args, {
+          ...(pidFile ? { pidFile } : {}),
+          env: process.env as Record<string, string | undefined>,
+        });
+        if (result.exitCode !== null && result.exitCode !== 0) {
+          err("opencode-rc failed to start in the background.");
+          if (result.stderr) err(result.stderr);
+          return 1;
+        }
+        out(`opencode-rc ${VERSION} started in the background (pid ${result.pid ?? "?"}).`);
+        if (pidFile) out(`  pid file: ${pidFile}`);
+        out(`  stop with: kill ${result.pid ?? "<pid>"}`);
+        return 0;
+      }
+
+      const { adapters, names, failures } = await loadOptionalAdapters(
         process.env as Record<string, string | undefined>,
       );
+      for (const failure of failures) err(`rc: ${failure.id} was not started: ${failure.reason}`);
       const wantCli = args.includes("--cli") || names.length === 0;
       const selected: Adapter[] = [];
       if (wantCli) selected.push(new CliAdapter(!args.includes("--no-cli")));
@@ -137,19 +162,13 @@ async function main(argv: string[]): Promise<number> {
       for (const adapter of adapters) {
         if (explicit.length === 0 || explicit.includes(adapter.id)) selected.push(adapter);
       }
-      const pidFile = args.includes("--pid-file")
-        ? args[args.indexOf("--pid-file") + 1]
-        : undefined;
-      const detach = args.includes("--detach");
       out(
         `opencode-rc ${VERSION} starting with: ${selected.map((a) => a.id).join(", ") || "(none)"}`,
       );
-      const handle = await runBridge({ adapters: selected, detach, pidFile });
-      if (!detach) {
-        // Adapters that are not interactive (pollers) resolve immediately; the
-        // CLI adapter blocks on stdin. Park the event loop until a signal.
-        await new Promise<void>(() => {});
-      }
+      const handle = await runBridge({ adapters: selected, ...(pidFile ? { pidFile } : {}) });
+      // Adapters that are not interactive (pollers) resolve immediately; the
+      // CLI adapter blocks on stdin. Park the event loop until a signal.
+      await new Promise<void>(() => {});
       await handle.stop();
       return 0;
     }

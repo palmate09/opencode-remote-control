@@ -275,8 +275,7 @@ describe("§6.6 — rotation", () => {
 });
 
 describe("§8.6 — retention", () => {
-  function buildRetention(days: number) {
-    const audit = testAudit(stateDir);
+  function buildRetention(days: number, audit = testAudit(stateDir)) {
     const logger = createLogger({ logDir, level: "error", stateDir, salt: "s" });
     const now = () => Date.now();
     const pairing = new PairingManager(stateDir, audit, now);
@@ -289,6 +288,7 @@ describe("§8.6 — retention", () => {
       auditRetentionDays: days,
       pairing,
       permissions,
+      audit,
       now,
     });
   }
@@ -318,10 +318,47 @@ describe("§8.6 — retention", () => {
     };
     writeFileSync(path, `${JSON.stringify(old)}\n${lines[1] ?? ""}\n`);
 
-    // The chain is deliberately broken by that edit; retention still runs.
     const result = buildRetention(90).purge();
     expect(result.auditRecordsRemoved).toBe(1);
     expect(readFileSync(path, "utf8").trim()).not.toContain("2000-01-01");
+  });
+
+  test("a purge re-anchors the chain, so `verify` still passes afterwards", () => {
+    // The bug this guards against: retention dropped old lines, leaving the
+    // first survivor's `prev` pointing at a deleted hash. `rc audit verify`
+    // then failed on every machine that had run for longer than the window.
+    const audit = testAudit(stateDir);
+    audit.append({ event: "recent", ns: "t" });
+    const path = join(logDir, "audit.jsonl");
+    // Backdate the first record; leave the second current.
+    const lines = readFileSync(path, "utf8").trim().split("\n");
+    const old = {
+      ...(JSON.parse(lines[0]!) as Record<string, unknown>),
+      ts: "2000-01-01T00:00:00.000Z",
+    };
+    audit.append({ event: "second", ns: "t" });
+    const after = readFileSync(path, "utf8").trim().split("\n");
+    after[0] = JSON.stringify(old);
+    writeFileSync(path, `${after.join("\n")}\n`);
+
+    const removed = buildRetention(90, audit).purge();
+    expect(removed.auditRecordsRemoved).toBeGreaterThan(0);
+
+    // The retained record is re-anchored to GENESIS and its hash recomputed.
+    const result = verifyChain(path);
+    expect(result.ok).toBe(true);
+    const kept = JSON.parse(readFileSync(path, "utf8").trim().split("\n")[0]!) as {
+      prev: string;
+      seq: number;
+    };
+    expect(kept.prev).toBe(GENESIS);
+    expect(kept.seq).toBe(0);
+
+    // And the live tail agrees, so the next append continues the new chain.
+    const rec = audit.append({ event: "after-purge", ns: "t" });
+    expect(rec.seq).toBe(1);
+    expect(rec.prev).not.toBe(GENESIS);
+    expect(verifyChain(path).ok).toBe(true);
   });
 
   test("runs at startup, not only on the timer", () => {

@@ -137,8 +137,10 @@ Full version: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 | A3 taps a button meant for someone else | The claim is keyed on the short id, which is per-request, not per-user. |
 | A3 answers after expiry | Expired requests are unreachable. |
 | A4 reads `state/access.json` | Mode `0600`, directory `0700`. Out of reach without the user's own account. |
-| A4 exfiltrates state files | `assertSendable()` refuses anything inside the state directory except `inbox/`, with `realpath` on both sides and a trailing separator so `/state-evil` cannot match `/state`. |
+| A4 exfiltrates state files | `assertSendable()` — invoked by `Bridge.sendFile` before **any** adapter sees a path — refuses anything inside the state directory except `inbox/`, with `realpath` on both sides and a trailing separator so `/state-evil` cannot match `/state`. Refusals are audited. |
 | A4 forges audit records | Hash-chained. `rc audit verify` names the exact broken record. |
+| A4 edits a transcript to evade erasure | `/forget` purges the actor's audit records and re-anchors the chain, so an export after erasure no longer returns them. |
+| A1/A3 forges a Discord button tap | The interactions endpoint verifies Discord's Ed25519 signature (`X-Signature-Ed25519` over `timestamp ‖ body`) before any permission is answered; a forged or replayed body is `401`. |
 | A5 observes traffic | Platform traffic is TLS to the platform. opencode should be bound to loopback or Tailscale, never the public internet. |
 | A6 lands a supply-chain change | `bun install --frozen-lockfile`, a dependency licence audit that fails on GPL/AGPL/SSPL, CODEOWNERS, and required CI gates. |
 
@@ -208,6 +210,9 @@ Specifically:
 | Audit chain tamper evidence | `tests/logger.test.ts` |
 | Message bodies never reach the audit log | `tests/bridge.test.ts` |
 | Capability declarations per adapter | `tests/adapters.test.ts`, `tests/http-adapters.test.ts` |
+| Discord interaction signature verification (forgery rejected) | `tests/discord.test.ts` |
+| Erasure removes records and the chain survives | `tests/bridge.test.ts`, `tests/logger.test.ts` |
+| File relay refuses state-directory paths | `tests/bridge.test.ts`, `tests/sanitize.test.ts`, `tests/telegram.test.ts` |
 | Pairing is terminal-only | `tests/cli.test.ts` |
 
 Two of those suites run real servers on loopback — a fake Telegram Bot API and
@@ -223,39 +228,35 @@ is what is **not** covered:
 
 | Area | State |
 |---|---|
-| Discord Gateway transport | **Never run.** Event parsing, payload round-trip and capability declarations are tested; the socket is not. |
-| Slack Socket Mode transport | **Never run.** Same. |
+| Discord HTTP interactions endpoint | Tested against a real server on loopback, with real Ed25519 signatures (`tests/discord.test.ts`) |
+| Discord Gateway transport (inbound messages) | **Never run.** Event parsing, payload round-trip and capability declarations are tested; the socket is not. |
+| Slack Socket Mode transport | **Never run.** Event parsing, payload round-trip and capability declarations are tested; the socket is not. |
 | MCP stdio transport | **Never run.** Same. |
 | Telegram, API, webhook transports | Tested against local servers |
-| Discord interaction signature verification | **Not implemented.** See below. |
 
-### Discord does not verify interaction signatures
-
-This is the most important caveat on this page.
+### Discord interaction signatures — implemented
 
 Discord sends a `X-Signature-Ed25519` header and a `X-Signature-Timestamp`
-header on every interaction. Verifying them requires the application's public
-key and an Ed25519 check over the raw request body. **opencode-rc does not
-perform this verification.**
+header on every interaction. The adapter now:
 
-What that means in practice: if you expose the Discord adapter to the public
-internet, anyone who can reach it can forge a `component` interaction and
-submit a permission verdict. The gate does not help here, because the forged
-interaction never becomes an `InboundMessage` — it goes straight to
-`answerPermission`.
+1. exposes an HTTP interactions endpoint (loopback by default);
+2. verifies the Ed25519 signature over `timestamp ‖ rawBody` **before** parsing
+   the payload, returning `401` for anything that does not verify;
+3. refuses to start at all if `RC_DISCORD_PUBLIC_KEY` is missing or not a valid
+   32-byte hex key, because without it every interaction is unforgeable-in-name
+   only.
 
-**Mitigations, in order of preference:**
+Because interactions are delivered to this endpoint, the Gateway
+`INTERACTION_CREATE` route was removed — keeping it would have reintroduced an
+unauthenticated path to `answerPermission`. A forged or replayed component body
+(the capture-and-swap attack) fails the signature check and never reaches the
+bridge. This is covered by `tests/discord.test.ts`.
 
-1. Do not expose the Discord adapter publicly. Discord requires a public
-   endpoint for interactions, which is precisely the exposure in question.
-2. Treat Discord permission relay as **unsafe for high-value agents** until
-   signature verification is implemented.
+The Gateway is still used for **inbound messages**, and that socket remains
+untested. It does not carry permissions, so a forged frame there cannot approve
+anything.
 
 Telegram's callback queries and Slack's block actions are authenticated by the
 platform's own connection — the adapter is long-polling or socket-connected
-using a bot token, and there is no inbound endpoint to forge against. **Telegram
-and Slack do not have this problem.** That is a meaningful difference, and it is
-why Telegram is the recommended first adapter.
-
-This is a known, deliberate gap in a 0.1 release rather than an oversight. It is
-tracked for a follow-up release.
+using a bot token, and there is no inbound endpoint to forge against. Discord
+now reaches the same standard via signature verification.

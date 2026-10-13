@@ -18,11 +18,18 @@ export {
   defaultStateDir,
   rotateIfNeeded,
   verifyChain,
+  purgeAuditFile,
   redactString,
   GENESIS,
   hashRecord,
 } from "./logger.js";
-export type { Logger, AuditRecord, LoggerOptions, VerifyResult } from "./logger.js";
+export type {
+  Logger,
+  AuditRecord,
+  LoggerOptions,
+  VerifyResult,
+  PurgeResult,
+} from "./logger.js";
 export { AuditLog } from "./logger.js";
 export * from "./config.js";
 export * from "./pairing.js";

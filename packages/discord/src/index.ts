@@ -13,7 +13,9 @@
  * acknowledged inside a **3-second interaction window** or the token expires.
  */
 
-import { createVerify } from "node:crypto";
+import { createPublicKey, verify as verifyEd25519Sig } from "node:crypto";
+import type { Server } from "bun";
+
 import type {
   Adapter,
   AdapterCapabilities,
@@ -30,6 +32,8 @@ export const DISCORD_CAPABILITIES: AdapterCapabilities = {
   permissionRelay: true,
   threads: true,
   richCards: true,
+  // Multipart upload to the channel/thread; cap is 25 MB (or 10 MB free tier).
+  files: true,
 };
 
 /** §10.1 — verified limits. */
@@ -50,15 +54,34 @@ interface GatewayEvent {
 
 export interface DiscordAdapterOptions {
   readonly token: string;
-  /** Application id, needed for the interaction endpoint URL. */
+  /** Application id, needed for interactions. */
   readonly applicationId?: string;
-  /** Ed25519 public key for verifying interaction signatures. Required for security. */
+  /**
+   * Ed25519 public key (hex) for verifying interaction signatures. **Required.**
+   *
+   * Discord signs every HTTP interaction; without this the endpoint cannot tell
+   * a real component tap from a forged one. The adapter refuses to start its
+   * interactions endpoint without it — see SECURITY.md.
+   */
   readonly publicKey: string;
   readonly apiBase?: string;
   readonly gatewayUrl?: string;
   readonly fetchImpl?: typeof fetch;
   /** Injectable for tests. */
   readonly socketFactory?: (url: string) => WebSocket;
+  /**
+   * Interactions endpoint. Discord delivers component taps over HTTP, not the
+   * Gateway, so without this endpoint permission buttons cannot be answered
+   * securely. Binds loopback by default; expose only behind TLS.
+   */
+  readonly interactionsHost?: string;
+  readonly interactionsPort?: number;
+  /** Overridable for tests. */
+  readonly serve?: (opts: {
+    port: number;
+    hostname: string;
+    fetch: (req: Request, server: Server) => Response | Promise<Response>;
+  }) => Server;
 }
 
 interface InteractionPayload {
@@ -89,9 +112,15 @@ export class DiscordAdapter implements Adapter {
   private readonly gatewayUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly socketFactory: (url: string) => WebSocket;
+  private readonly interactionsHost: string;
+  private readonly interactionsPort: number;
+  private readonly serve: NonNullable<DiscordAdapterOptions["serve"]>;
+  /** The Ed25519 public key, parsed once; `undefined` when the hex is invalid. */
+  private readonly verifyKey: ReturnType<typeof createPublicKey> | undefined;
 
   private ctx: AdapterContext | undefined;
   private ws: WebSocket | undefined;
+  private interactionsServer: Server | undefined;
   private running = false;
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private sequence: number | null = null;
@@ -112,6 +141,18 @@ export class DiscordAdapter implements Adapter {
       opts.gatewayUrl ?? `wss://gateway.discord.gg/?v=${GATEWAY_VERSION}&encoding=json`;
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.socketFactory = opts.socketFactory ?? ((url) => new WebSocket(url));
+    this.interactionsHost = opts.interactionsHost ?? "127.0.0.1";
+    this.interactionsPort = opts.interactionsPort ?? 8789;
+    this.serve =
+      opts.serve ??
+      ((o) =>
+        Bun.serve({
+          port: o.port,
+          hostname: o.hostname,
+          fetch: o.fetch,
+          idleTimeout: 0,
+        }));
+    this.verifyKey = parseEd25519PublicKey(opts.publicKey);
   }
 
   // ── REST ─────────────────────────────────────────────────────────────────
@@ -148,20 +189,29 @@ export class DiscordAdapter implements Adapter {
     this.ctx = ctx;
     this.running = true;
 
-    // SECURITY: this adapter does not verify Discord's Ed25519 interaction
-    // signature. Interactions arrive on the Gateway, which is authenticated by
-    // the bot token — but a self-hosted Gateway does not prove to *us* that a
-    // given interaction frame came from Discord rather than from something that
-    // observed our connection.
-    //
-    // The honest position, matching SECURITY.md: permission relay over Discord
-    // should be treated as weaker than Telegram's until signature verification
-    // exists. We refuse to be silent about it at startup.
-    ctx.logger.warn(
-      "discord adapter does not verify interaction signatures (Ed25519). Treat permission " +
-        "relay as weaker than Telegram's. See SECURITY.md → Untested surface.",
-      { botId: this.botName },
-    );
+    if (!this.verifyKey) {
+      // Fail closed. Without a usable key every interaction is unverifiable, so
+      // the permission endpoint would be forgeable. Refusing to start is the
+      // honest choice; the operator fixes RC_DISCORD_PUBLIC_KEY.
+      throw new Error(
+        "discord: RC_DISCORD_PUBLIC_KEY is missing or not a valid 32-byte Ed25519 hex key. " +
+          "Permission relay cannot be authenticated without it.",
+      );
+    }
+
+    // Interactions arrive over HTTP, not the Gateway. This endpoint verifies the
+    // Ed25519 signature on every request before it is allowed to answer a
+    // permission, which is the whole reason Discord can advertise
+    // permissionRelay (§7.4 layer 7).
+    this.interactionsServer = this.serve({
+      port: this.interactionsPort,
+      hostname: this.interactionsHost,
+      fetch: (req) => this.routeInteraction(req),
+    });
+    ctx.logger.info("discord interactions endpoint listening", {
+      host: this.interactionsHost,
+      port: this.interactionsPort,
+    });
 
     // Resolve our own id so `<@id>` mentions can be stripped and our own
     // messages never come back in as inbound.
@@ -185,44 +235,76 @@ export class DiscordAdapter implements Adapter {
     this.heartbeat = undefined;
     this.ws?.close();
     this.ws = undefined;
+    await this.interactionsServer?.stop(false);
+    this.interactionsServer = undefined;
     this.ctx?.audit.append({ event: "adapter.stop", ns: "discord" });
   }
 
+  /** Routes an HTTP interaction: PING, or a signed component tap. */
+  private async routeInteraction(req: Request): Promise<Response> {
+    if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+
+    // The signature covers the *raw* body. Read it once, as text, before any
+    // JSON handling — a re-serialised body would not match the signed bytes.
+    const raw = await req.text();
+    if (!this.verifyInteraction(req, raw)) {
+      this.ctx?.audit.append({
+        event: "discord.bad_signature",
+        outcome: "drop",
+        ns: "discord",
+        fields: { path: new URL(req.url).pathname },
+      });
+      return new Response("invalid request signature", { status: 401 });
+    }
+
+    let payload: InteractionPayload & { type: number };
+    try {
+      payload = JSON.parse(raw) as InteractionPayload & { type: number };
+    } catch {
+      return new Response("bad json", { status: 400 });
+    }
+
+    // Discord's endpoint-validation PING. Type 1 must be answered with type 1.
+    if (payload.type === 1) return json({ type: 1 });
+
+    // A component (button) tap. Acknowledge first — the 3-second window applies
+    // to the HTTP response too.
+    if (payload.type === 3) {
+      void this.onInteraction(payload).catch((err) => {
+        this.ctx?.logger.error("discord interaction handler failed", { error: String(err) });
+      });
+      return json({ type: 5 }); // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+    }
+
+    return json({ type: 4, data: { content: "Unsupported interaction." } });
+  }
+
   /**
-   * Verify the Ed25519 signature of a Discord interaction.
-   * Discord sends the signature in the `X-Signature-Ed25519` header and the
-   * timestamp in `X-Signature-Timestamp`. The signed message is
-   * `timestamp + body`.
+   * §7.4 layer 7 — verify the Ed25519 signature of a Discord interaction.
+   *
+   * Discord signs `timestamp || rawBody`. The signature is in
+   * `X-Signature-Ed25519`, the timestamp in `X-Signature-Timestamp`. A request
+   * that fails this check is discarded and audited; it never reaches
+   * `answerPermission`, which is exactly the property SECURITY.md used to say
+   * we did not have.
    */
-  private verifySignature(req: Request): boolean {
+  verifyInteraction(req: Request, rawBody: string): boolean {
+    if (!this.verifyKey) return false;
     const signature = req.headers.get("X-Signature-Ed25519");
     const timestamp = req.headers.get("X-Signature-Timestamp");
     if (!signature || !timestamp) {
       this.ctx?.logger.warn("discord interaction missing signature headers");
       return false;
     }
-    // The body must be the raw request body. We need to read it as text.
-    // Since the body may have been consumed, we rely on the caller to provide it.
-    // This method is a placeholder - the actual verification happens in the
-    // REST endpoint handler which has access to the raw body.
-    // For Gateway events, Discord doesn't send signatures (the WebSocket is authenticated).
-    return true;
-  }
-
-  /**
-   * Verify an Ed25519 signature given the public key, message, and signature.
-   */
-  private static verifyEd25519(
-    publicKeyHex: string,
-    message: string,
-    signatureHex: string,
-  ): boolean {
+    const sigBuf = hexToBytes(signature);
+    if (!sigBuf || sigBuf.length !== 64) return false;
     try {
-      const publicKey = new Uint8Array(Buffer.from(publicKeyHex, "hex"));
-      const signature = new Uint8Array(Buffer.from(signatureHex, "hex"));
-      const verifier = createVerify("ed25519");
-      verifier.update(message);
-      return verifier.verify(publicKey, signature);
+      return verifyEd25519Sig(
+        null,
+        new TextEncoder().encode(timestamp + rawBody),
+        this.verifyKey,
+        sigBuf,
+      );
     } catch {
       return false;
     }
@@ -319,8 +401,11 @@ export class DiscordAdapter implements Adapter {
           return;
         }
         if (event.t === "MESSAGE_CREATE") return this.onMessage(event.d);
-        if (event.t === "INTERACTION_CREATE")
-          return this.onInteraction(event.d as unknown as InteractionPayload);
+        // INTERACTION_CREATE is deliberately NOT handled here. It arrives at
+        // the HTTP interactions endpoint instead, where the Ed25519 signature is
+        // verified. Handling it on the Gateway as well would reintroduce an
+        // unauthenticated path to `answerPermission` — the exact forgery the
+        // signature check exists to prevent.
         return;
       }
       default:
@@ -402,7 +487,9 @@ export class DiscordAdapter implements Adapter {
 
     const parsed = parseCustomId(customId);
     if (!parsed) {
-      await this.respond(payload, { type: 4, data: { content: "Unknown action." } });
+      // The HTTP layer already returned the deferred ACK; report the outcome by
+      // editing the original message rather than sending a second callback.
+      await this.editOriginal(payload, "Unknown action.");
       return;
     }
 
@@ -417,9 +504,6 @@ export class DiscordAdapter implements Adapter {
       ns: "discord",
       fields: { shortId: parsed.shortId, verdict: parsed.verdict },
     });
-
-    // ACK inside 3s or the token dies.
-    await this.respond(payload, { type: 5 });
 
     const applied = await this.ctx.bridge.answerPermission(
       { platform: this.id, chatId, ...(payload.thread_id ? { threadId: payload.thread_id } : {}) },
@@ -522,6 +606,33 @@ export class DiscordAdapter implements Adapter {
     }
   }
 
+  /**
+   * §7.4 layer 6 — upload a file to the channel/thread. The bridge has already
+   * run the exfiltration guard; this only has to build the multipart request.
+   */
+  async sendFile(
+    conversation: { platform: string; chatId: string; threadId?: string },
+    file: { path: string; name: string; caption?: string },
+  ): Promise<void> {
+    const target =
+      conversation.threadId && conversation.threadId !== conversation.chatId
+        ? conversation.threadId
+        : conversation.chatId;
+    const bytes = await Bun.file(file.path).arrayBuffer();
+    const form = new FormData();
+    if (file.caption) form.set("content", file.caption);
+    form.set("files[0]", new Blob([bytes]), file.name);
+    const res = await this.fetchImpl(`${this.apiBase}/channels/${target}/messages`, {
+      method: "POST",
+      headers: { authorization: `Bot ${this.token}` },
+      body: form,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`discord upload → ${res.status}: ${detail.slice(0, 200)}`);
+    }
+  }
+
   private async post(
     chatId: string,
     threadId: string,
@@ -585,6 +696,51 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * Parses Discord's 32-byte raw Ed25519 public key (hex) into a Node `KeyObject`.
+ *
+ * Node's `verify` does not accept a bare 32-byte key for Ed25519 — that is the
+ * "Invalid digest" trap. The raw key must be wrapped in a SubjectPublicKeyInfo
+ * DER structure: a fixed 12-byte prefix followed by the key bytes.
+ *
+ * Returns `undefined` on anything that is not exactly 32 hex-encoded bytes, so
+ * the adapter can fail closed rather than start with a key it cannot use.
+ */
+export function parseEd25519PublicKey(hex: string): ReturnType<typeof createPublicKey> | undefined {
+  const trimmed = String(hex ?? "").trim();
+  if (!/^[0-9a-fA-F]{64}$/.test(trimmed)) return undefined;
+  // DER prefix for an Ed25519 SPKI: SEQUENCE { SEQUENCE { OID 1.3.101.112 } BIT STRING <key> }.
+  const prefix = hexToBytes("302a300506032b6570032100");
+  const raw = hexToBytes(trimmed);
+  if (!prefix || !raw) return undefined;
+  const key = new Uint8Array(prefix.length + raw.length);
+  key.set(prefix, 0);
+  key.set(raw, prefix.length);
+  try {
+    return createPublicKey({ key, format: "der", type: "spki" });
+  } catch {
+    return undefined;
+  }
+}
+
+/** Hex → bytes without depending on a Buffer/Node type that Bun re-declares. */
+function hexToBytes(hex: string): Uint8Array | undefined {
+  const s = String(hex ?? "");
+  if (s.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(s)) return undefined;
+  const out = new Uint8Array(s.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number.parseInt(s.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
 export function create(env: Record<string, string | undefined>): DiscordAdapter {
   const token = env.RC_DISCORD_BOT_TOKEN;
   if (!token) throw new Error("RC_DISCORD_BOT_TOKEN is not set");
@@ -595,6 +751,12 @@ export function create(env: Record<string, string | undefined>): DiscordAdapter 
     publicKey,
     ...(env.RC_DISCORD_APPLICATION_ID ? { applicationId: env.RC_DISCORD_APPLICATION_ID } : {}),
     ...(env.RC_DISCORD_API_BASE ? { apiBase: env.RC_DISCORD_API_BASE } : {}),
+    ...(env.RC_DISCORD_INTERACTIONS_HOST
+      ? { interactionsHost: env.RC_DISCORD_INTERACTIONS_HOST }
+      : {}),
+    ...(env.RC_DISCORD_INTERACTIONS_PORT
+      ? { interactionsPort: Number.parseInt(env.RC_DISCORD_INTERACTIONS_PORT, 10) }
+      : {}),
   });
 }
 

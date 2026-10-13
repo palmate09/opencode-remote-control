@@ -34,6 +34,8 @@ export const WEBHOOK_CAPABILITIES: AdapterCapabilities = {
   permissionRelay: false,
   threads: false,
   richCards: true,
+  // Outbound has no file transport: the consumer polls cards, not uploads.
+  files: false,
 };
 
 const MAX_BODY_BYTES = 256 * 1024;

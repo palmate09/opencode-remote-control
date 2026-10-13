@@ -43,6 +43,7 @@ function makeContext(sink: Sink): AdapterContext {
       sink.answered.push([conversation, shortId, verdict]);
       return true;
     },
+    sendFile: async () => true,
   };
   const noopLogger = {
     ns: "t",

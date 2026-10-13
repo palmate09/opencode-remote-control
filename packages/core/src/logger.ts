@@ -19,6 +19,7 @@ import {
   renameSync,
   statSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -214,6 +215,35 @@ export class AuditLog {
     return out;
   }
 
+  /**
+   * §6.3 / §8.5 / §8.6 — remove records matching `predicate` and re-anchor the
+   * chain. See {@link purgeAuditFile} for why this is the one place we rewrite
+   * an append-only file.
+   *
+   * The in-memory tail is re-seated from the rewrite so the next append
+   * continues the new chain rather than the one we just replaced.
+   */
+  purge(predicate: (rec: AuditRecord) => boolean): number {
+    const result = purgeAuditFile(this.path, predicate);
+    if (result.removed === 0) return 0;
+    this.seq = result.seq;
+    this.prevHash = result.head;
+    return result.removed;
+  }
+
+  /** §8.6 — remove records older than a cutoff, re-anchoring the chain. */
+  purgeOlderThan(cutoffMs: number): number {
+    return this.purge((rec) => {
+      const t = Date.parse(rec.ts);
+      return Number.isFinite(t) && t < cutoffMs;
+    });
+  }
+
+  /** §8.5 — erasure: remove every record belonging to one hashed actor id. */
+  purgeActor(hashedId: string): number {
+    return this.purge((rec) => rec.actor?.id === hashedId);
+  }
+
   get currentSeq(): number {
     return this.seq;
   }
@@ -247,6 +277,79 @@ function canonicalFields(fields: Record<string, unknown> | undefined): string {
   const sorted: Record<string, unknown> = {};
   for (const k of Object.keys(fields).sort()) sorted[k] = fields[k];
   return JSON.stringify(sorted);
+}
+
+export interface PurgeResult {
+  readonly removed: number;
+  /** The `seq` the next appended record should take. */
+  readonly seq: number;
+  /** The new chain head; `prev` of the next appended record. */
+  readonly head: string;
+}
+
+/**
+ * §6.3 — remove records matching `predicate` and re-anchor the chain.
+ *
+ * Dropping lines from a hash chain is not free. A naive delete leaves the first
+ * surviving record pointing at a now-absent predecessor, so `verifyChain`
+ * reports a `prev-hash mismatch` and the tamper-evidence the log exists to
+ * provide becomes a false alarm on every purge — which is exactly what retention
+ * did before this existed.
+ *
+ * This rewrites the survivors with fresh, contiguous `seq` values and recomputed
+ * `hash`/`prev`, starting again from {@link GENESIS}. The chain still detects an
+ * edit *within* the surviving window; it does not pretend to prove anything
+ * about records the operator chose to erase. That is the honest position for
+ * retention and for erasure alike, and it is why this is the one place we
+ * rewrite an append-only file — atomically, via a `.purge` temp file and a
+ * rename, so a crash mid-rewrite cannot corrupt the chain.
+ *
+ * Takes a bare path rather than an `AuditLog` so retention, which holds only the
+ * path, can call it without a second live tail that would then disagree with the
+ * file.
+ */
+export function purgeAuditFile(
+  path: string,
+  predicate: (rec: AuditRecord) => boolean,
+): PurgeResult {
+  if (!existsSync(path)) return { removed: 0, seq: 0, head: GENESIS };
+  const lines = readFileSync(path, "utf8")
+    .split("\n")
+    .filter((l) => l.trim());
+  const keep: AuditRecord[] = [];
+  let removed = 0;
+  for (const line of lines) {
+    let rec: AuditRecord;
+    try {
+      rec = JSON.parse(line) as AuditRecord;
+    } catch {
+      removed++;
+      continue;
+    }
+    if (predicate(rec)) {
+      removed++;
+      continue;
+    }
+    keep.push(rec);
+  }
+  if (removed === 0) {
+    const last = keep[keep.length - 1];
+    return { removed: 0, seq: keep.length, head: last?.hash ?? GENESIS };
+  }
+
+  let prev = GENESIS;
+  const out: string[] = [];
+  for (let i = 0; i < keep.length; i++) {
+    const rec = keep[i] as AuditRecord;
+    const next: AuditRecord = { ...rec, seq: i, prev };
+    next.hash = hashRecord(next);
+    prev = next.hash;
+    out.push(JSON.stringify(next));
+  }
+  const tmp = `${path}.purge`;
+  writeFileSync(tmp, out.length ? `${out.join("\n")}\n` : "", { mode: 0o600 });
+  renameSync(tmp, path);
+  return { removed, seq: keep.length, head: prev };
 }
 
 export interface VerifyResult {

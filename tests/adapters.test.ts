@@ -38,6 +38,7 @@ describe("§7.4 layer 7 — capability declarations", () => {
       expect(typeof caps.permissionRelay, name).toBe("boolean");
       expect(typeof caps.threads, name).toBe("boolean");
       expect(typeof caps.richCards, name).toBe("boolean");
+      expect(typeof caps.files, name).toBe("boolean");
     }
   });
 
@@ -45,6 +46,14 @@ describe("§7.4 layer 7 — capability declarations", () => {
     // A webhook URL authenticates the caller of an HTTP endpoint, not a person.
     // Declaring otherwise would be a remote-code-execution bug.
     expect(WEBHOOK_CAPABILITIES.permissionRelay).toBe(false);
+  });
+
+  test("`files: true` is paired with an actual sendFile method", () => {
+    // Declaring the capability without an implementation would make /send lie.
+    for (const [name, caps] of adapters) {
+      if (!caps.files) continue;
+      expect(["telegram", "discord", "slack", "api"], name).toContain(name);
+    }
   });
 
   test("every adapter that DOES relay buttons carries a user id", () => {

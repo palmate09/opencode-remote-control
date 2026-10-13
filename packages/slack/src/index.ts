@@ -26,6 +26,8 @@ export const SLACK_CAPABILITIES: AdapterCapabilities = {
   permissionRelay: true,
   threads: true,
   richCards: true,
+  // files.upload (V2) is available with the bot token.
+  files: true,
 };
 
 export const SLACK_BLOCK_LIMIT = 3000;
@@ -244,6 +246,34 @@ export class SlackAdapter implements Adapter {
     for (const card of msg.cards) {
       await this.render(channel, msg.conversation.threadId ?? this.threads.get(channel), card);
     }
+  }
+
+  /**
+   * §7.4 layer 6 — upload a file. Slack's modern flow is two HTTPS calls:
+   * `files.getUploadURLExternal` mints a URL, we PUT the bytes, then
+   * `files.completeUploadExternal` shares it. The bridge has already run the
+   * exfiltration guard.
+   */
+  async sendFile(
+    conversation: { platform: string; chatId: string; threadId?: string },
+    file: { path: string; name: string; caption?: string },
+  ): Promise<void> {
+    const bytes = await Bun.file(file.path).arrayBuffer();
+    const urlResp = await this.api<{ upload_url: string; file_id: string }>(
+      "files.getUploadURLExternal",
+      { filename: file.name, length: bytes.byteLength },
+    );
+    const put = await this.fetchImpl(urlResp.upload_url, {
+      method: "POST",
+      body: bytes,
+    });
+    if (!put.ok) throw new Error(`slack upload PUT → ${put.status}`);
+    await this.api("files.completeUploadExternal", {
+      files: [{ id: urlResp.file_id, title: file.name }],
+      channel_id: conversation.chatId,
+      ...(conversation.threadId ? { thread_ts: conversation.threadId } : {}),
+      ...(file.caption ? { initial_comment: file.caption } : {}),
+    });
   }
 
   private async render(channel: string, threadTs: string | undefined, card: Card): Promise<void> {

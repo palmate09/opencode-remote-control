@@ -11,6 +11,9 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Server } from "bun";
 
 import type {
@@ -68,6 +71,10 @@ beforeAll(() => {
         case "sendMessage":
         case "editMessageText":
           return ok({ message_id: 1, chat: { id: body.chat_id }, text: body.text });
+        case "sendDocument":
+          // The body is multipart, so `req.json()` above yielded {} — the
+          // method name from the path is what the test asserts on.
+          return ok({ message_id: 2, chat: { id: 555 } });
         case "answerCallbackQuery":
           return ok(true);
         default:
@@ -112,6 +119,7 @@ function makeContext(sink: { sent: InboundMessage[]; answered: [string, Permissi
       sink.answered.push([shortId, verdict]);
       return true;
     },
+    sendFile: async () => true,
   };
   const ctx = {
     config: {} as AdapterContext["config"],
@@ -492,6 +500,55 @@ describe("outbound rendering", () => {
       cards: [{ kind: "text", markdown: "hello" }],
     });
     expect(findCall("sendMessage")).toBeUndefined();
+    await a.stop();
+  });
+});
+
+describe("file upload (§7.4 layer 6)", () => {
+  test("an approved path is uploaded as sendDocument", async () => {
+    // The bridge runs the exfiltration guard; the adapter only has to make the
+    // multipart request. This test covers the adapter half.
+    const a = adapter();
+    await a.start(makeContext(sink));
+
+    const path = join(tmpdir(), `rc-upload-${Date.now()}.txt`);
+    writeFileSync(path, "report contents");
+
+    await a.sendFile({ platform: "telegram", chatId: "555" }, { path, name: "report.txt" });
+
+    const sent = findCall("sendDocument");
+    expect(sent).toBeDefined();
+    expect(sent!.method).toBe("sendDocument");
+
+    unlinkSync(path);
+    await a.stop();
+  });
+
+  test("an unparseable chat id is a no-op, like send()", async () => {
+    const a = adapter();
+    await a.start(makeContext(sink));
+    const path = join(tmpdir(), `rc-upload-${Date.now()}.txt`);
+    writeFileSync(path, "x");
+
+    await a.sendFile({ platform: "telegram", chatId: "not-a-number" }, { path, name: "x.txt" });
+    expect(findCall("sendDocument")).toBeUndefined();
+
+    unlinkSync(path);
+    await a.stop();
+  });
+
+  test("a rejected upload throws, so the bridge can report the failure", async () => {
+    const a = adapter();
+    await a.start(makeContext(sink));
+    await expect(
+      a.sendFile(
+        { platform: "telegram", chatId: "555" },
+        {
+          path: "/nonexistent/definitely-missing-xyz",
+          name: "gone.txt",
+        },
+      ),
+    ).rejects.toThrow();
     await a.stop();
   });
 });

@@ -37,6 +37,8 @@ export const API_CAPABILITIES: AdapterCapabilities = {
   permissionRelay: true,
   threads: true,
   richCards: true,
+  // Files reach API clients as base64 in the SSE card payload.
+  files: true,
 };
 
 const MAX_BODY_BYTES = 128 * 1024;
@@ -272,6 +274,32 @@ export class ApiAdapter implements Adapter {
       type: "unknown",
       rawType: "rc.cards",
       properties: { chat: msg.conversation.chatId, cards: msg.cards.map(plainCard) },
+    });
+  }
+
+  /**
+   * §7.4 layer 6 — a file reaches API clients as a base64 attachment on the SSE
+   * stream. The bridge has already run the exfiltration guard.
+   *
+   * There is no size cap here beyond what the process can hold: an API client
+   * chose the path, unlike a chat platform with a documented limit. The guard,
+   * not a byte ceiling, is what stops `/state/access.json` leaving the machine.
+   */
+  async sendFile(
+    conversation: { platform: string; chatId: string; threadId?: string },
+    file: { path: string; name: string; caption?: string },
+  ): Promise<void> {
+    const bytes = await Bun.file(file.path).arrayBuffer();
+    this.publish({
+      type: "unknown",
+      rawType: "rc.file",
+      properties: {
+        chat: conversation.chatId,
+        name: file.name,
+        bytes: bytes.byteLength,
+        ...(file.caption ? { caption: sanitizeText(file.caption, 500) } : {}),
+        dataBase64: Buffer.from(bytes).toString("base64"),
+      },
     });
   }
 }
